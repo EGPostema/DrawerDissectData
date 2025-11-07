@@ -2,6 +2,8 @@
 
 This dataset includes all transcriptions, IDs, and measurements extracted from the Field Museum's entire >13K collection of pinned tiger beetles (Cicindelidae) using [DrawerDissect](https://github.com/EGPostema/DrawerDissect/tree/main).
 
+<img width="250" height="250" alt="image" src="https://github.com/user-attachments/assets/26b1029b-e4b7-4cf4-b69d-badf1ba000bc" />
+
 ## Manuscript
 
 Postema, E.G., Briscoe, L., Harder, C., Hancock, G.R.A., Guarnieri, L.D, Eisel, T., Welch, K., Fisher, N., Johnson, C., Souza, D., Sepulveda, T., Phillip, D., Baquiran, R., de Medeiros, B.A.S. 2025. DrawerDissect: Whole-drawer insect imaging, segmentation, and trait extraction using AI. EcoEvoRxiv (pre-print). https://doi.org/10.32942/X2QW84
