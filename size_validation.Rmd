@@ -1,0 +1,226 @@
+---
+title: "fmnhtiger_size"
+author: "EGP"
+date: "2025-04-16"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r}
+rm(list=ls())
+graphics.off()
+```
+# Read-In Data
+```{r}
+full_data<-read.csv("spec_expanded.csv")
+handmeasures<-read.csv("handmeasure.csv")
+
+# Make sure size is numeric
+
+full_data$spec_area_mm2 <- full_data$spec_area_mm2 %>%
+  na_if("NONE") %>%
+  na_if("MISSING") %>%
+  na_if("") %>%
+  as.numeric()
+
+full_data$len1_mm <- full_data$len1_mm %>%
+  na_if("NONE") %>%
+  na_if("MISSING") %>%
+  na_if("") %>%
+  as.numeric()
+
+full_data$len2_mm <- full_data$len2_mm %>%
+  na_if("NONE") %>%
+  na_if("MISSING") %>%
+  na_if("") %>%
+  as.numeric()
+```
+# Install Packages
+```{r}
+library("dplyr")
+library("ggplot2")
+library("tidyverse")
+library("gridExtra")
+```
+# Organize Data
+## Get full_ids for hand-measured specimens
+```{r}
+# match barcode to tray_id
+barcode_tray <- full_data %>%
+  distinct(unit_barcode, tray_id)
+
+# merge with handmeasures
+handmeasures <- merge(handmeasures, barcode_tray, 
+                      by = "unit_barcode", all.x = TRUE)
+
+# add spec number
+handmeasures$full_id <- paste0(handmeasures$tray_id, "_spec_", 
+                               sprintf("%03d", handmeasures$spec_position))
+```
+## Create df with manual + digital measurements
+```{r}
+full_data <- left_join(full_data, 
+                       handmeasures[, c("full_id", "manual_length_mm", "manual_width_mm")],
+                       by = "full_id")
+```
+# Plots
+## Create Digital vs Manual df
+```{r}
+# rename to indicate digital measurements
+full_data <- full_data %>%
+  rename(digital_length_mm = len1_mm,
+         digital_width_mm = len2_mm)
+
+# only look at specimens w/ digital & manual
+comparison <- full_data %>%
+  filter(!is.na(manual_length_mm) & !is.na(digital_length_mm) &
+         !is.na(manual_width_mm) & !is.na(digital_width_mm))
+```
+### LENGTH Digital vs Manual
+```{r}
+# calculate regression info
+
+length_lm <- lm(digital_length_mm ~ manual_length_mm, data = comparison)
+length_r2 <- round(summary(length_lm)$r.squared, 3)
+length_eq <- paste0("R² = ", length_r2)
+
+# make simple plot
+
+length_compare<-ggplot(comparison, aes(x = manual_length_mm, y = digital_length_mm)) +
+  geom_point(alpha = 0.8, color = "black", fill = "red", shape = 21, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  labs(x = "Manual Length (mm)",
+       y = "Digital Length (mm)") +
+  theme_minimal() +
+  theme(axis.title.x = element_text(margin = margin(t = 15)),
+        axis.title.y = element_text(margin = margin(r = 15))) +
+  annotate("text", x = 15, y = 25, label = length_eq) +
+  scale_x_continuous(limits = c(5, 40), breaks = seq(5, 40, by = 10), minor_breaks = NULL) +
+  scale_y_continuous(limits = c(5, 40), breaks = seq(5, 40, by = 10), minor_breaks = NULL)
+```
+### WIDTH Digital vs Manual
+```{r}
+# calculate regression info
+
+width_lm <- lm(digital_width_mm ~ manual_width_mm, data = comparison)
+width_r2 <- round(summary(width_lm)$r.squared, 3)
+width_eq <- paste0("R² = ", width_r2)
+
+# make simple plot
+
+width_compare<-ggplot(comparison, aes(x = manual_width_mm, y = digital_width_mm)) +
+  geom_point(alpha = 0.8, color = "black", fill = "blue", shape = 21, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  labs(x = "Manual Width (mm)",
+       y = "Digital Width (mm)") +
+  annotate("text", x = 4, y = 8, label = width_eq) +
+  theme_minimal() +
+  theme(axis.title.x = element_text(margin = margin(t = 15)),
+        axis.title.y = element_text(margin = margin(r = 15))) +
+  scale_x_continuous(limits = c(0, 12), breaks = seq(0, 12, by = 2), minor_breaks = NULL) +
+  scale_y_continuous(limits = c(0, 12), breaks = seq(0, 12, by = 2), minor_breaks = NULL)
+
+```
+### Combined Plot
+```{r}
+grid.arrange(length_compare, width_compare, ncol=2)
+```
+## Length by Genera
+```{r}
+# Calculate means and standard errors by genus
+genus_stats <- full_data %>%
+  filter(!is.na(genus) & genus != "") %>%  # Remove NA and blank genus names
+  group_by(genus) %>%
+  summarise(
+    avg_length = mean(digital_length_mm, na.rm = TRUE),
+    se_length = sd(digital_length_mm, na.rm = TRUE) / sqrt(sum(!is.na(digital_length_mm))),
+    avg_width = mean(digital_width_mm, na.rm = TRUE),
+    se_width = sd(digital_width_mm, na.rm = TRUE) / sqrt(sum(!is.na(digital_width_mm))),
+    avg_area = mean(spec_area_mm2, na.rm = TRUE),
+    se_area = sd(spec_area_mm2, na.rm = TRUE) / sqrt(sum(!is.na(spec_area_mm2))),
+    n_specimens = sum(!is.na(digital_length_mm)),  # Count specimens per genus
+    .groups = 'drop'
+  ) %>%
+  filter(!is.na(avg_length) & !is.na(avg_width) & !is.na(avg_area))
+```
+### Avg Lenth Plot
+```{r}
+genus_lengths <- genus_stats %>%
+  arrange(desc(avg_length)) %>%
+  mutate(genus = factor(genus, levels = genus)) %>%
+  ggplot(aes(x = genus, y = avg_length)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = avg_length - se_length, ymax = avg_length + se_length),
+                width = 0.2) +
+  labs(x = "Genus",
+       y = "Average Length (mm)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 9),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank(), axis.line = element_line(color = "gray")) +
+  theme(axis.title.x = element_text(margin = margin(t = 15)),
+        axis.title.y = element_text(margin = margin(r = 15)))
+
+plot(genus_lengths)
+```
+
+```{r}
+length_compare <- ggplot(comparison, aes(x = manual_length_mm, y = digital_length_mm)) +
+  geom_point(alpha = 0.8, color = "black", fill = "red", shape = 21, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  labs(x = "Manual Length (mm)",
+       y = "Digital Length (mm)") +
+  theme_minimal(base_size = 12) +
+  theme(axis.title.x = element_text(margin = margin(t = 15), size = 12),
+        axis.title.y = element_text(margin = margin(r = 15), size = 12),
+        axis.text = element_text(size = 11),
+        axis.ticks = element_blank(),
+        axis.line = element_line(color = "gray")) +
+  annotate("text", x = 15, y = 25, label = length_eq, size = 4) +
+  scale_x_continuous(limits = c(5, 40), breaks = seq(5, 40, by = 10), minor_breaks = NULL) +
+  scale_y_continuous(limits = c(5, 40), breaks = seq(5, 40, by = 10), minor_breaks = NULL)
+
+width_compare <- ggplot(comparison, aes(x = manual_width_mm, y = digital_width_mm)) +
+  geom_point(alpha = 0.8, color = "black", fill = "blue", shape = 21, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  labs(x = "Manual Width (mm)",
+       y = "Digital Width (mm)") +
+  annotate("text", x = 4, y = 8, label = width_eq, size = 4) +
+  theme_minimal(base_size = 12) +
+  theme(axis.title.x = element_text(margin = margin(t = 15), size = 12),
+        axis.title.y = element_text(margin = margin(r = 15), size = 12),
+        axis.text = element_text(size = 11),
+        axis.ticks = element_blank(),
+        axis.line = element_line(color = "gray")) +
+  scale_x_continuous(limits = c(0, 12), breaks = seq(0, 12, by = 2), minor_breaks = NULL) +
+  scale_y_continuous(limits = c(0, 12), breaks = seq(0, 12, by = 2), minor_breaks = NULL)
+
+genus_lengths <- genus_stats %>%
+  arrange(desc(avg_length)) %>%
+  mutate(genus = factor(genus, levels = genus)) %>%
+  ggplot(aes(x = genus, y = avg_length)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = avg_length - se_length, ymax = avg_length + se_length),
+                width = 0.2) +
+  labs(x = "Genus",
+       y = "Average Length (mm)") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 10),
+        axis.text.y = element_text(size = 11),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank(), 
+        axis.line = element_line(color = "gray"),
+        axis.title.x = element_text(margin = margin(t = 15), size = 12),
+        axis.title.y = element_text(margin = margin(r = 15), size = 12))
+
+# Create the layout
+combined_plot <- grid.arrange(
+  length_compare, width_compare, genus_lengths,
+  layout_matrix = rbind(c(1, 2),
+                       c(3, 3)),
+  heights = c(1, 1.2)
+)
+print(combined_plot)
+```
+
