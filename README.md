@@ -2,7 +2,7 @@
 
 This dataset includes all transcriptions, IDs, and measurements extracted from the Field Museum's entire >13K collection of pinned tiger beetles (Cicindelidae) using [DrawerDissect](https://github.com/EGPostema/DrawerDissect/tree/main).
 
-<img width="250" height="250" alt="image" src="https://github.com/user-attachments/assets/26b1029b-e4b7-4cf4-b69d-badf1ba000bc" />
+<img width="1033" height="738" alt="Screenshot 2025-11-06 212525" src="https://github.com/user-attachments/assets/a1701d65-108a-480f-a818-c55b0027eb10" />
 
 ## Manuscript
 
