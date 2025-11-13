@@ -14,15 +14,26 @@ Postema, E.G., Briscoe, L., Harder, C., Hancock, G.R.A., Guarnieri, L.D, Eisel, 
 
 -   **`size_validation.Rmd`** - Analysis comparing manual vs. digital measurements and generating genus-level size summaries.
 
--   **`specimen_ranges.Rmd`** - Visualizing the geographic distribution of tiger beetle specimens in the FMNH collection.
+-   **`maps.Rmd`** - Visualizing the geographic distribution of tiger beetle specimens in the FMNH collection.
 
 ### Data CSVs
 
+-   **`countries.csv`** - List of countries that specimens belong to
 -   **`handmeasure.csv`** - Manual measurements for a random subset
 -   **`spec_expanded.csv`** - Fully merged specimen-level dataset for the FMNH tiger beetle collection
 -   **`llm_validation.csv`** - Includes all raw LLM transcriptions and revised locations for specimen-level metadata, plus reviewer commentary on estimate quality
 
 ## Variables
+
+### countries.csv
+
+-   `full_id`: specimen ID produced by DrawerDissect; concatenation of drawer_id, tray_id, and specimen position
+-   `tray_id`: unit tray ID produced by DrawerDissect
+-   `country_transcribed`: country the specimen was collected from, either manually or LLM-transcribed
+-   `country_est`: an estimated country, filled in using a known country common to the unity tray
+-   `country_all`: full list of countries (transcribed and estimated)
+-   `country_source`: tag for transcribed vs estimated
+-   `trasnscription_from`: the source for the transcription, either fully manual or LLM-produced
 
 ### handmeasure.csv
 
@@ -34,10 +45,10 @@ Postema, E.G., Briscoe, L., Harder, C., Hancock, G.R.A., Guarnieri, L.D, Eisel, 
 
 ### spec_expanded.csv
 
--   `full_id`: specimen ID produced by DrawerDissect; concatenation of drawer_id, tray_id, and specimen position
+-   `full_id`: same as above
 -   `FMNH-INS#`: unique Field Museum-specific ID, associated with a QR code
 -   `drawer_id`: same as above
--   `tray_id`: tray ID produced by DrawerDissect
+-   `tray_id`: same as above
 -   `unit_barcode`: same as above
 -   `full_taxonomy`: unstructured taxonomic identity as a full string, e.g. "Species genus subspecies"
 -   `genus`
