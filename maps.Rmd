@@ -1,0 +1,239 @@
+---
+title: "Tiger Beetle Maps"
+author: "EGP"
+date: "2025-06-18"
+output: html_document
+---
+
+```{r}
+rm(list=ls())
+graphics.off()
+```
+# Read-In Data
+```{r}
+full_data<-read.csv("spec_expanded.csv")
+countries<-read.csv("countries.csv")
+```
+# Packages
+```{r}
+library(tidyverse)
+library(broom)
+library(viridis)
+library(cowplot)
+library(car)
+library(moments)
+library(gridExtra)
+library(patchwork)
+```
+# Data Summaries
+```{r}
+full_data$spec_area_mm2 <- full_data$spec_area_mm2 %>%
+  na_if("NONE") %>%
+  na_if("MISSING") %>%
+  na_if("") %>%
+  as.numeric()
+
+full_data$len1_mm <- full_data$len1_mm %>%
+  na_if("NONE") %>%
+  na_if("MISSING") %>%
+  na_if("") %>%
+  as.numeric()
+
+full_data$len2_mm <- full_data$len2_mm %>%
+  na_if("NONE") %>%
+  na_if("MISSING") %>%
+  na_if("") %>%
+  as.numeric()
+
+# Size distribution
+summary(full_data$spec_area_mm2)
+
+# Latitude distribution
+summary(full_data$latitude)
+
+```
+## Summary Plots
+### Body Size
+#### Histogram
+```{r}
+
+ggplot(full_data, aes(x = spec_area_mm2)) +
+  geom_histogram(bins = 50, fill = "black", alpha = 0.7) +
+  labs(title = "Distribution of Body Size", 
+       x = "Body Size (mm²)", y = "Count") +
+  theme_minimal()
+
+# Data probably need to be log-transformed due to HUGE Manticora
+
+ggplot(full_data, aes(x = spec_area_mm2)) +
+  geom_histogram(bins = 50, fill = "red", alpha = 0.7) +
+  scale_x_log10() +
+  labs(title = "Distribution of Body Size (Log Scale)", 
+       x = "Body Size (mm²) - Log Scale", y = "Count") +
+  theme_minimal()
+
+full_data$log10_size <- log10(full_data$spec_area_mm2)
+```
+#### QQplot
+```{r}
+qq_size<-ggplot(full_data, aes(sample = spec_area_mm2)) +
+  stat_qq(alpha = 0.6) + stat_qq_line(color = "red") +
+  labs(title = "D. Q-Q Plot: Original", 
+       x = "Theoretical", y = "Sample") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 12))
+
+qq_log10size<-ggplot(full_data, aes(sample = log10_size)) +
+  stat_qq(alpha = 0.6) + stat_qq_line(color = "red") +
+  labs(title = "E. Q-Q Plot: Log₁₀", 
+       x = "Theoretical", y = "Sample") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 12))
+
+grid.arrange(qq_size,qq_log10size, ncol = 2)
+
+# I know Manticora will be massive outliers but I don't want to exclude them from the dataset as they represent true and interesting biological variation; genus will simply need to be included in the model
+```
+
+###Latitudes
+```{r}
+# our collection is quite northern hemisphere biased
+hemisphere_summary <- full_data %>%
+  mutate(hemisphere = ifelse(latitude >= 0, "Northern", "Southern")) %>%
+  count(hemisphere) %>%
+  mutate(percent = round(n / sum(n) * 100, 1))
+
+print(hemisphere_summary)
+```
+
+####Latitude bands
+```{r}
+# temperate bias (over 30%), with decent sampling around the tropics N and S
+
+full_data$lat_band <- cut(full_data$latitude, 
+                              breaks = seq(-60, 60, by = 10),
+                              labels = paste(seq(-60, 50, by = 10), "to", seq(-50, 60, by = 10)),
+                              include.lowest = TRUE)
+
+lat_band_summary <- full_data %>%
+  count(lat_band) %>%
+  mutate(percent = round(n / sum(n) * 100, 1)) %>%
+  filter(!is.na(lat_band))
+
+print(lat_band_summary)
+```
+####Histograms
+```{r}
+# raw latitude - again, showing temperate and N hem. bias
+ggplot(full_data, aes(x = latitude)) +
+  geom_histogram(bins = 30, fill = "steelblue", alpha = 0.7, color = "white") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
+  labs(
+    title = "A. Raw Latitude Distribution",
+    x = "Latitude (°)",
+    y = "Number of Specimens",
+    caption = "Red line = Equator"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 12))
+
+```
+###Genus
+```{r}
+# counts, mean/median, sd, variation, min/max, range, and mean/sd for log10 size
+
+genus_summary <- full_data %>%
+  group_by(genus) %>%
+  summarise(
+    n_specimens = n(),
+    mean_size = mean(spec_area_mm2),
+    median_size = median(spec_area_mm2),
+    sd_size = sd(spec_area_mm2),
+    cv_size = sd_size / mean_size,
+    min_size = min(spec_area_mm2),
+    max_size = max(spec_area_mm2),
+    size_range = max_size - min_size,
+    mean_log_size = mean(log10_size),
+    sd_log_size = sd(log10_size),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_specimens))
+print(genus_summary)
+```
+
+```{r}
+# only use genera with at least 20 specimens
+
+genera_20plus <- genus_summary %>%
+  filter(n_specimens >= 20)
+
+print(genera_20plus)
+
+```
+####Size ranges
+```{r}
+genera_sizes <- full_data %>%
+  filter(genus %in% genera_20plus$genus) %>%
+  ggplot(aes(x = reorder(genus, spec_area_mm2, median), y = spec_area_mm2)) +
+  geom_boxplot(alpha = 0.7, outlier.alpha = 0.5) +
+  scale_y_log10() +
+  coord_flip() +
+  labs(
+    title = "Size Distribution by Genus",
+    x = "Genus",
+    y = "Body Size (mm²) - Log Scale",
+    caption = "Ordered by median size"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(face = "italic", size = 10),
+    plot.title = element_text(size = 12)
+  )
+
+plot(genera_sizes)
+```
+# Map
+```{r}
+# make bins for specimen counts by country (estimated from representative)
+countrylist<-as.data.frame(table(countries$country_all))
+countrylist<-rename(countrylist, admin=Var1)
+countrylist<-rename(countrylist, freq=Freq)
+bin<-as.numeric(cut(countrylist$freq,breaks = c(0,5,10,30,100,500,9000)))
+countrylist<-cbind(countrylist,bin)
+world <- ne_countries(scale = "medium", returnclass = "sf")
+world<-left_join(world,countrylist,by='admin')
+world<-world[-c(240),]
+
+# points for known coordinates
+sites <- countries %>%
+  select(latitude, longitude)
+sites<-distinct(sites)
+
+```
+## Plot Map
+```{r}
+map <- ggplot(data = world) +
+  geom_sf(aes(fill = bin)) + 
+  scale_fill_viridis_c(
+    option = "viridis",
+    name = "count",
+    breaks = c(1, 2, 3, 4, 5, 6),
+    labels = c("0", "5", "10", "30", "100", "500+")
+  ) +
+  geom_point(data = sites, aes(y = latitude, x = longitude), 
+             size = 2, col = "black", alpha = .6, stroke = 0.1, 
+             shape = 21, fill = "red") +
+  theme_void() +
+  theme(
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.grid = element_blank(),
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+plot(map)
+
+```
+
