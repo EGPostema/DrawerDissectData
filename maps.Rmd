@@ -24,6 +24,7 @@ library(car)
 library(moments)
 library(gridExtra)
 library(patchwork)
+library(rnaturalearth)
 ```
 # Data Summaries
 ```{r}
