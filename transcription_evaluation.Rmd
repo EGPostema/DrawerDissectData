@@ -1,0 +1,955 @@
+---
+title: "Transcription Evaluation Pipeline"
+subtitle: "Field-by-field comparison of Claude transcriptions against Human-Produced records"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = TRUE,
+  warning = FALSE
+)
+```
+
+# Packages
+
+Install once if needed:
+
+```{r install, eval=FALSE}
+install.packages(c("tidyverse", "stringdist", "ggtext"))
+```
+
+```{r libraries}
+library(tidyverse)
+library(stringdist)  # stringsim(), method = "lv"
+library(ggtext)      # element_markdown() for styled axis labels
+```
+
+---
+
+# Data
+
+## Load
+
+```{r load-data}
+human_produced <- read.csv("dwc_existing_records.csv")
+claude       <- read.csv("claude_transcriptions.csv")
+
+# Rename collector -> recordedBy to match DarwinCore and human_produced
+claude <- claude %>% rename(recordedBy = collector)
+
+# Load hand-transcribed records from additional trays.
+human_produced_new <- bind_rows(
+  # prefix needed
+  read.csv("34_4_7_tray_07GT.csv") %>%
+    mutate(specimen_id = paste0("cicindelidae_", specimen_id)),
+  read.csv("34_6_8_tray_09GT.csv") %>%
+    mutate(specimen_id = paste0("cicindelidae_", specimen_id)),
+  read.csv("34_7_5_tray_04GT.csv") %>%
+    mutate(specimen_id = paste0("cicindelidae_", specimen_id)),
+  # prefix already present
+  read.csv("tray01GT.csv"),
+  read.csv("tray03GT.csv")
+) %>%
+  rename(recordedBy = collector) %>%
+  select(any_of(names(human_produced)))
+
+# Merge records
+human_produced <- human_produced %>%
+  filter(!specimen_id %in% human_produced_new$specimen_id) %>%
+  bind_rows(human_produced_new)
+```
+
+---
+
+# Date Standardisation
+
+## Parser function
+
+```{r parse-dwc-date}
+parse_dwc_date <- function(x) {
+
+  # ---- Preprocessing --------------------------------------------------------
+
+  if (is.na(x) | str_trim(x) == "") return(NA_character_)
+  x <- str_trim(x)
+
+  # Convert Roman numeral months to numeric.
+  roman_months <- c(
+    "XII" = "12", "XI" = "11", "VIII" = "08", "VII" = "07",
+    "VI"  = "06", "IX" = "09", "X"    = "10", "IV"  = "04",
+    "III" = "03", "II" = "02", "I"    = "01", "V"   = "05"
+  )
+  x_clean <- x
+  for (roman in names(roman_months)) {
+    x_clean <- str_replace_all(
+      x_clean,
+      regex(paste0("\\b", roman, "\\b"), ignore_case = FALSE),
+      roman_months[roman]
+    )
+  }
+
+  # Strip trailing periods from month abbreviations: "Aug." -> "Aug"
+  x_clean <- str_replace_all(x_clean, "(?<=[a-zA-Z])\\.", "")
+
+  # Expand 2-digit years
+  to_4digit_year <- function(yr) {
+    yr <- as.integer(yr)
+    if (yr < 100) yr <- yr + 1900
+    as.character(yr)
+  }
+
+  # Month name abbreviation -> 2-digit number
+  month_abbr <- c(
+    jan = "01", feb = "02", mar = "03", apr = "04",
+    may = "05", jun = "06", jul = "07", aug = "08",
+    sep = "09", oct = "10", nov = "11", dec = "12"
+  )
+
+  # Pad a string to a 2-digit integer: "3" -> "03"
+  pad2 <- function(s) sprintf("%02d", as.integer(s))
+
+  # Swap MM and DD if month > 12
+  fix_mm_dd <- function(yyyy, mm, dd) {
+    mm <- as.integer(mm); dd <- as.integer(dd)
+    if (mm >= 1 & mm <= 12 & dd >= 1 & dd <= 31)
+      return(paste0(yyyy, "-", sprintf("%02d", mm), "-", sprintf("%02d", dd)))
+    else if (dd >= 1 & dd <= 12 & mm >= 1 & mm <= 31)
+      return(paste0(yyyy, "-", sprintf("%02d", dd), "-", sprintf("%02d", mm)))
+    else
+      return(NA_character_)
+  }
+
+  # ---- Date ranges ----------------------------------------------------------
+
+  # Already in DwC range format: "YYYY-MM-DD/YYYY-MM-DD"
+  if (str_detect(x_clean, "^\\d{4}-\\d{2}-\\d{2}/\\d{4}-\\d{2}-\\d{2}$"))
+    return(x_clean)
+
+  # Numeric month + day range + year: "07:3-4:1971", "08, 17-19, 2000"
+  m <- str_match(x_clean, "^(\\d{1,2})[,:\\s]+?(\\d{1,2})[-].(\\d{1,2})[,:\\s]+?(\\d{2,4})$")
+  if (!is.na(m[1, 1])) {
+    yyyy <- to_4digit_year(m[1, 5])
+    mm   <- pad2(m[1, 2])
+    return(paste0(yyyy, "-", mm, "-", pad2(m[1, 3]),
+                  "/",
+                  yyyy, "-", mm, "-", pad2(m[1, 4])))
+  }
+
+  # Month name + day range + year: "06 May 1981 - 11 May 1981"
+  m <- str_match(
+    str_to_lower(x_clean),
+    "(\\d{1,2})[-\\s](jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[-\\s](\\d{2,4})\\s*[-]\\s*(\\d{1,2})[-\\s](jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[-\\s](\\d{2,4})"
+  )
+  if (!is.na(m[1, 1])) {
+    return(paste0(
+      to_4digit_year(m[1, 4]), "-", month_abbr[m[1, 3]], "-", pad2(m[1, 2]),
+      "/",
+      to_4digit_year(m[1, 7]), "-", month_abbr[m[1, 6]], "-", pad2(m[1, 5])
+    ))
+  }
+
+  # Month name + year range: "Apr-97 - Jun-97", "Apr 1997 - Jun 1997"
+  m <- str_match(
+    str_to_lower(x_clean),
+    "(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[-\\s](\\d{2,4})\\s*[-]\\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[-\\s](\\d{2,4})"
+  )
+  if (!is.na(m[1, 1])) {
+    return(paste0(
+      to_4digit_year(m[1, 3]), "-", month_abbr[m[1, 2]],
+      "/",
+      to_4digit_year(m[1, 5]), "-", month_abbr[m[1, 4]]
+    ))
+  }
+
+  # ---- Single dates ---------------------------------------------------------
+
+  # ISO format: "YYYY-MM-DD" — validate and fix swapped DD-MM if needed
+  m <- str_match(x_clean, "^(\\d{4})-(\\d{2})-(\\d{2})$")
+  if (!is.na(m[1, 1]))
+    return(fix_mm_dd(m[1, 2], m[1, 3], m[1, 4]))
+
+  # European dot format: "DD.MM.YYYY" or "DD.MM.YY"
+  m <- str_match(x_clean, "^(\\d{1,2})\\.(\\d{1,2})\\.(\\d{2,4})$")
+  if (!is.na(m[1, 1]))
+    return(fix_mm_dd(to_4digit_year(m[1, 4]), m[1, 3], m[1, 2]))
+
+  # Dash-separated day-first: "DD-MM-YYYY" or "DD-MM-YY"
+  m <- str_match(x_clean, "^(\\d{1,2})-(\\d{2})-(\\d{2,4})$")
+  if (!is.na(m[1, 1]))
+    return(fix_mm_dd(to_4digit_year(m[1, 4]), m[1, 3], m[1, 2]))
+
+  # US month-first after Roman numeral conversion: "MM-DD-YYYY"
+  m <- str_match(x_clean, "^(\\d{1,2})-(\\d{1,2})-(\\d{2,4})$")
+  if (!is.na(m[1, 1]))
+    return(fix_mm_dd(to_4digit_year(m[1, 4]), m[1, 2], m[1, 3]))
+
+  # Month name, day, year: "29 Jul 1972", "29-Jul-1972", "29 Aug. 1950"
+  m <- str_match(
+    str_to_lower(x_clean),
+    "(\\d{1,2})[-\\s](jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[-\\s](\\d{2,4})"
+  )
+  if (!is.na(m[1, 1]))
+    return(paste0(to_4digit_year(m[1, 4]), "-", month_abbr[m[1, 3]], "-", pad2(m[1, 2])))
+
+  # Month name + year only: "Apr 1997", "Sep-63", "Aug. 1921"
+  m <- str_match(
+    str_to_lower(x_clean),
+    "^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[-\\s](\\d{2,4})$"
+  )
+  if (!is.na(m[1, 1]))
+    return(paste0(to_4digit_year(m[1, 3]), "-", month_abbr[m[1, 2]]))
+
+  # Year + month only: "YYYY-MM"
+  m <- str_match(x_clean, "^(\\d{4})-(\\d{2})$")
+  if (!is.na(m[1, 1]))
+    return(paste0(m[1, 2], "-", pad2(m[1, 3])))
+
+  # Year only: "1972"
+  m <- str_match(x_clean, "^(\\d{4})$")
+  if (!is.na(m[1, 1])) return(m[1, 2])
+
+  # Nothing matched - return NA
+  NA_character_
+}
+```
+
+## Translate verbatimEventDate to normalised eventDate for LLM results
+
+```{r add-eventdate}
+claude <- claude %>%
+  mutate(eventDate = sapply(verbatimEventDate, parse_dwc_date))
+```
+
+---
+
+# Create Evaluation Dataframe
+
+```{r basic-eval}
+eval_fields <- c("country", "stateProvince", "county", "municipality",
+                 "locality", "islandGroup", "island", "verbatimElevation",
+                 "habitat", "samplingProtocol", "recordedBy",
+                 "verbatimEventDate")
+
+# Check fill rate across all specimens with detected text
+claude %>%
+  filter(match_type != "no_text_detected") %>%
+  select(specimen_id, all_of(eval_fields), eventDate) %>%
+  rowwise() %>%
+  mutate(any_filled = any(
+    !is.na(c_across(all_of(c(eval_fields, "eventDate")))) &
+      c_across(all_of(c(eval_fields, "eventDate"))) != ""
+  )) %>%
+  ungroup() %>%
+  summarise(
+    n_total        = n(),
+    n_any_filled   = sum(any_filled),
+    pct_any_filled = round(sum(any_filled) / n() * 100, 1)
+  ) %>%
+  print()
+
+basic_eval <- claude %>%
+  select(specimen_id, all_of(eval_fields)) %>%
+  inner_join(
+    human_produced %>% select(specimen_id, all_of(eval_fields)),
+    by     = "specimen_id",
+    suffix = c("_claude", "_truth")
+  )
+```
+
+## Convert verbatimEventDate to eventDate for all matched pairs
+
+```{r parse-dates}
+# Parse verbatimEventDate from both sides into standardised eventDate,
+# then drop the raw verbatim columns.
+basic_eval <- basic_eval %>%
+  mutate(
+    eventDate_claude = sapply(verbatimEventDate_claude, parse_dwc_date),
+    eventDate_truth  = sapply(verbatimEventDate_truth,  parse_dwc_date)
+  ) %>%
+  select(-verbatimEventDate_claude, -verbatimEventDate_truth)
+```
+
+## Shape data for comparison
+
+```{r pivot-long}
+claude_long <- basic_eval %>%
+  select(specimen_id, ends_with("_claude")) %>%
+  pivot_longer(-specimen_id, names_to = "field", values_to = "claude_val") %>%
+  mutate(field = str_remove(field, "_claude"))
+
+truth_long <- basic_eval %>%
+  select(specimen_id, ends_with("_truth")) %>%
+  pivot_longer(-specimen_id, names_to = "field", values_to = "truth_val") %>%
+  mutate(field = str_remove(field, "_truth"))
+```
+
+---
+
+# Scoring Fields
+
+## Normalize + Tokenize
+
+```{r scoring-functions}
+# Normalisation lookup: common abbreviations and variants
+toponym_lookup <- c(
+  "kohchun"      = "hengchun",
+  "tranquebar"   = "tharangambadi",
+  "norsta auren" = "norsta aura",
+  "poonmudi"     = "ponmudi",
+  "hollandia"    = "jayapura",
+  "formosa"      = "taiwan"
+)
+
+normalise_str <- function(x) {
+  if (is.na(x) | str_trim(x) == "") return(NA_character_)
+  x <- str_to_lower(str_trim(x))
+  x <- iconv(x, to = "ASCII//TRANSLIT")
+  x <- str_replace_all(x, "-", " ")
+  x <- str_replace_all(x, c(
+    "\\bmt\\.?\\b"         = "mount",
+    "\\bmts\\.?\\b"        = "mountains",
+    "\\bst\\.?\\b"         = "saint",
+    "\\brt\\.?\\b"         = "route",
+    "\\br\\.?\\b"          = "river",
+    "\\bl\\.?\\b"          = "lake",
+    "\\bn\\.?\\b"          = "north",
+    "\\bs\\.?\\b"          = "south",
+    "\\be\\.?\\b"          = "east",
+    "\\bw\\.?\\b"          = "west",
+    "\\bft\\.?\\b"         = "fort",
+    "\\bco\\.?\\b"         = "county",
+    "\\busa\\b"            = "united states of america",
+    "\\bu\\.s\\.a?\\.?\\b" = "united states of america",
+    "\\bunited states\\b"  = "united states of america",
+    "\\bmi\\.?\\b"         = "miles",
+    "\\bkm\\.?\\b"         = "kilometers",
+    "\\bnp\\.?\\b"         = "national park"
+  ))
+  x <- str_replace_all(x, "[^a-z0-9\\s]", " ")
+  x <- str_squish(x)
+  tokens <- str_split(x, "\\s+")[[1]]
+  tokens <- sapply(tokens, function(t) {
+    if (t %in% names(toponym_lookup)) toponym_lookup[[t]] else t
+  })
+  paste(tokens, collapse = " ")
+}
+
+tokenise <- function(x) {
+  if (is.na(x)) return(character(0))
+  str_split(x, "\\s+")[[1]]
+}
+
+# Token-level Levenshtein composite score
+composite_score <- function(a, b) {
+  a_empty <- is.na(a) | str_trim(a) == ""
+  b_empty <- is.na(b) | str_trim(b) == ""
+
+  if (a_empty) return(NA_real_)   # claude null -> missing
+  if (b_empty) return(0)          # claude filled, truth empty -> false positive
+
+  a_norm <- normalise_str(a)
+  b_norm <- normalise_str(b)
+
+  a_tokens <- tokenise(a_norm)
+  b_tokens <- tokenise(b_norm)
+
+  if (length(a_tokens) == 0) return(NA_real_)
+  if (length(b_tokens) == 0) return(0)
+
+  hp_scores <- sapply(b_tokens, function(bt) {
+    max(stringsim(bt, a_tokens, method = "lv"))
+  })
+
+  round(mean(hp_scores), 3)
+}
+
+# eval_fields for scoring excludes verbatimEventDate (handled separately as eventDate)
+score_fields <- c("country", "stateProvince", "county", "municipality",
+                  "locality", "islandGroup", "island", "verbatimElevation",
+                  "habitat", "samplingProtocol", "recordedBy")
+
+# Apply composite_score to basic_eval
+basic_eval <- basic_eval %>%
+  rowwise() %>%
+  mutate(across(
+    all_of(paste0(score_fields, "_claude")),
+    ~ composite_score(.x, get(str_replace(cur_column(), "_claude", "_truth"))),
+    .names = "{str_replace(.col, '_claude', '_composite')}"
+  )) %>%
+  ungroup()
+```
+
+## Composite Scores
+
+```{r composite-long}
+composite_long <- basic_eval %>%
+  select(specimen_id, ends_with("_composite")) %>%
+  pivot_longer(-specimen_id, names_to = "field", values_to = "composite") %>%
+  mutate(field = str_remove(field, "_composite"))
+
+composite_data <- composite_long %>%
+  filter(field %in% score_fields) %>%
+  left_join(claude_long, by = c("specimen_id", "field")) %>%
+  left_join(truth_long,  by = c("specimen_id", "field")) %>%
+  group_by(field) %>%
+  summarise(
+    mean     = mean(composite, na.rm = TRUE),
+    se       = sd(composite, na.rm = TRUE) / sqrt(sum(!is.na(composite))),
+    n_scored = sum(!is.na(composite)),
+    .groups  = "drop"
+  )
+```
+
+## Plot Similarity
+
+```{r plot-similarity}
+composite_data %>%
+  mutate(field = reorder(field, mean)) %>%
+  ggplot(aes(x = field, y = mean, fill = mean)) +
+  geom_col(alpha = 0.9) +
+  geom_errorbar(aes(ymin = mean - se, ymax = mean + se),
+                width = 0.3, color = "grey30") +
+  geom_hline(yintercept = 0.75, linetype = "longdash",
+             color = "black", linewidth = 0.8) +
+  geom_hline(yintercept = 0.50, linetype = "longdash",
+             color = "grey60", linewidth = 0.6) +
+  coord_flip() +
+  scale_fill_gradientn(
+    colours = c("#de7859", "#de7859", "#e8a87c", "#c8d897", "#c8d897", "#39A26F"),
+    values  = scales::rescale(c(0, 0.30, 0.50, 0.65, 0.75, 1)),
+    limits  = c(0, 1),
+    guide   = "none"
+  ) +
+  scale_y_continuous(limits = c(0, 1),
+                     breaks = seq(0, 1, by = 0.20),
+                     expand = expansion(mult = c(0.05, 0.05))) +
+  labs(x = NULL, y = "B. Mean Token-Level Levenshtein Similarity") +
+  theme_minimal() +
+  theme(
+    axis.text.y        = element_text(size = 9, hjust = 1, margin = margin(r = -10)),
+    legend.position    = "none",
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank()
+  )
+```
+
+## Evaluate Date
+
+```{r eval-date}
+extract_date_components <- function(x) {
+  if (is.na(x) | str_trim(x) == "") return(list(year=NA, month=NA, day=NA))
+  x <- str_split(x, "/")[[1]][1]
+  parts <- str_split(x, "-")[[1]]
+  list(
+    year  = if (length(parts) >= 1) parts[1] else NA,
+    month = if (length(parts) >= 2) parts[2] else NA,
+    day   = if (length(parts) >= 3) parts[3] else NA
+  )
+}
+
+eventdate_eval <- basic_eval %>%
+  select(specimen_id, eventDate_claude, eventDate_truth) %>%
+  filter(!is.na(eventDate_claude) & eventDate_claude != "",
+         !is.na(eventDate_truth)  & eventDate_truth  != "") %>%
+  rowwise() %>%
+  mutate(
+    c = list(extract_date_components(eventDate_claude)),
+    t = list(extract_date_components(eventDate_truth)),
+    year_match  = !is.na(c$year)  & !is.na(t$year)  & c$year  == t$year,
+    month_match = !is.na(c$month) & !is.na(t$month) & c$month == t$month,
+    day_match   = !is.na(c$day)   & !is.na(t$day)   & c$day   == t$day,
+    year_wrong  = !is.na(c$year)  & !is.na(t$year)  & c$year  != t$year,
+    month_wrong = !is.na(c$month) & !is.na(t$month) & c$month != t$month,
+    day_wrong   = !is.na(c$day)   & !is.na(t$day)   & c$day   != t$day,
+    match_category = case_when(
+      eventDate_claude == eventDate_truth              ~ "exact match",
+      year_match & month_match & day_match             ~ "exact match",
+      year_wrong | month_wrong | day_wrong             ~ "no match",
+      year_match & month_match & is.na(c$day)          ~ "year-month match",
+      year_match & day_match   & is.na(c$month)        ~ "year-day match",
+      month_match & day_match  & is.na(c$year)         ~ "month-day match",
+      year_match  & is.na(c$month) & is.na(c$day)      ~ "year only match",
+      month_match & is.na(c$year)  & is.na(c$day)      ~ "month only match",
+      day_match   & is.na(c$year)  & is.na(c$month)    ~ "day only match",
+      TRUE                                             ~ "no match"
+    )
+  ) %>%
+  ungroup() %>%
+  select(-c, -t)
+
+eventdate_eval %>%
+  count(match_category, sort = TRUE) %>%
+  mutate(pct = round(n / sum(n) * 100, 1))
+
+eventdate_eval %>%
+  filter(match_category %in% c("no match", "year only match")) %>%
+  select(specimen_id, eventDate_claude, eventDate_truth, match_category) %>%
+  group_by(match_category) %>%
+  slice_sample(n = 5) %>%
+  ungroup()
+```
+
+## Determine Similarity Threshold
+
+```{r spot-check}
+slices    <- c(0.5, 0.6, 0.7, 0.75, 0.8, 1.0)
+tolerance <- 0.01
+
+spot_check <- composite_long %>%
+  filter(field %in% score_fields) %>%
+  left_join(claude_long, by = c("specimen_id", "field")) %>%
+  left_join(truth_long,  by = c("specimen_id", "field")) %>%
+  filter(!is.na(composite),
+         !is.na(claude_val) & claude_val != "",
+         !is.na(truth_val)  & truth_val  != "") %>%
+  mutate(slice = case_when(
+    composite >= 0.50 - tolerance & composite <= 0.50 + tolerance ~ "0.50",
+    composite >= 0.60 - tolerance & composite <= 0.60 + tolerance ~ "0.60",
+    composite >= 0.70 - tolerance & composite <= 0.70 + tolerance ~ "0.70",
+    composite >= 0.75 - tolerance & composite <= 0.75 + tolerance ~ "0.75",
+    composite >= 0.80 - tolerance & composite <= 0.80 + tolerance ~ "0.80",
+    composite >= 1.00 - tolerance & composite <= 1.00             ~ "1.00",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(slice)) %>%
+  group_by(slice, field) %>%
+  slice_sample(n = 5) %>%
+  ungroup() %>%
+  arrange(slice, field) %>%
+  select(slice, field, claude_val, truth_val, composite)
+
+spot_check
+```
+
+## Check for Misplacement
+
+```{r misplacement}
+truth_wide <- basic_eval %>%
+  select(specimen_id, ends_with("_truth"))
+
+misplacement <- composite_long %>%
+  filter(field %in% score_fields) %>%
+  left_join(claude_long, by = c("specimen_id", "field")) %>%
+  left_join(truth_long,  by = c("specimen_id", "field")) %>%
+  filter(!is.na(claude_val) & claude_val != "") %>%
+  left_join(truth_wide, by = "specimen_id") %>%
+  rowwise() %>%
+  mutate(
+    max_composite_any_truth = max(
+      sapply(score_fields, function(f) {
+        tv <- get(paste0(f, "_truth"))
+        if (is.na(tv) | tv == "") return(0)
+        composite_score(claude_val, tv)
+      }),
+      na.rm = TRUE
+    ),
+    misplaced = case_when(
+      composite >= 0.75 ~ FALSE,
+      is.na(composite)  ~ max_composite_any_truth >= 0.75,
+      TRUE              ~ max_composite_any_truth >= 0.75
+    )
+  ) %>%
+  ungroup()
+```
+
+```{r misplacement-table}
+truth_long_all <- truth_wide %>%
+  pivot_longer(-specimen_id,
+               names_to  = "truth_field",
+               values_to = "truth_val_all") %>%
+  mutate(truth_field = str_remove(truth_field, "_truth"))
+
+misplacement %>%
+  filter(misplaced) %>%
+  select(specimen_id, field, claude_val, composite) %>%
+  left_join(truth_long_all, by = "specimen_id") %>%
+  filter(!is.na(truth_val_all) & truth_val_all != "") %>%
+  mutate(sim = mapply(composite_score, claude_val, truth_val_all)) %>%
+  group_by(specimen_id, field, claude_val) %>%
+  slice_max(sim, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  filter(field != truth_field) %>%
+  count(field, truth_field, sort = TRUE) %>%
+  arrange(field, desc(n))
+```
+
+```{r misplacement-heatmap}
+field_levels <- c("country", "stateProvince", "county", "municipality",
+                  "locality", "islandGroup", "island", "habitat", "recordedBy")
+
+misplacement %>%
+  filter(misplaced) %>%
+  select(specimen_id, field, claude_val, composite) %>%
+  left_join(truth_long_all, by = "specimen_id") %>%
+  filter(!is.na(truth_val_all) & truth_val_all != "") %>%
+  mutate(sim = mapply(composite_score, claude_val, truth_val_all)) %>%
+  group_by(specimen_id, field, claude_val) %>%
+  slice_max(sim, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  filter(field != truth_field) %>%
+  count(field, truth_field) %>%
+  complete(field = field_levels, truth_field = field_levels, fill = list(n = 0)) %>%
+  filter(field != truth_field) %>%
+  mutate(
+    field       = factor(field,       levels = rev(field_levels)),
+    truth_field = factor(truth_field, levels = field_levels)
+  ) %>%
+  ggplot(aes(x = truth_field, y = field, fill = n)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  geom_text(aes(label = ifelse(n > 0, n, "")),
+            color = "black", size = 4, fontface = "bold") +
+  scale_fill_gradient(low = "grey88", high = "#8B0000",
+                      limits = c(0, 10), oob = scales::squish,
+                      guide = "none") +
+  scale_x_discrete(position = "top") +
+  labs(x = "human-produced field", y = "LLM-filled field") +
+  coord_fixed() +
+  theme_minimal() +
+  theme(
+    axis.text.x  = element_text(angle = 45, hjust = 0, vjust = 0, size = 10),
+    axis.text.y  = element_text(size = 10),
+    axis.title   = element_text(size = 11, face = "bold"),
+    panel.grid   = element_blank(),
+    plot.margin  = margin(t = 80, r = 40, b = 10, l = 10),
+    aspect.ratio = 1
+  )
+```
+
+```{r attempt-df}
+attempt_df <- composite_long %>%
+  filter(field %in% score_fields) %>%
+  left_join(claude_long, by = c("specimen_id", "field")) %>%
+  left_join(truth_long,  by = c("specimen_id", "field")) %>%
+  left_join(
+    misplacement %>% select(specimen_id, field, misplaced),
+    by = c("specimen_id", "field")
+  ) %>%
+  mutate(
+    claude_filled = !is.na(claude_val) & claude_val != "",
+    truth_filled  = !is.na(truth_val)  & truth_val  != "",
+    category = case_when(
+      !truth_filled                                  ~ NA_character_,
+      claude_filled & !is.na(misplaced) & misplaced  ~ "LLM misplaced",
+      claude_filled &  truth_filled                  ~ "LLM filled",
+     !claude_filled &  truth_filled                  ~ "LLM missed",
+      TRUE                                           ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(category)) %>%
+  group_by(field, category) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(field) %>%
+  mutate(
+    proportion = n / sum(n),
+    category   = factor(category, levels = c("LLM filled", "LLM misplaced", "LLM missed"))
+  ) %>%
+  ungroup()
+
+field_order_attempt <- attempt_df %>%
+  filter(category == "LLM filled") %>%
+  arrange(proportion) %>%
+  pull(field)
+
+message(sprintf("Total misplaced fields: %d", sum(misplacement$misplaced, na.rm = TRUE)))
+```
+
+```{r attempt-plot}
+field_n_attempt <- composite_long %>%
+  filter(field %in% score_fields) %>%
+  left_join(truth_long, by = c("specimen_id", "field")) %>%
+  mutate(truth_filled = !is.na(truth_val) & truth_val != "") %>%
+  group_by(field) %>%
+  summarise(n_filled = sum(truth_filled), .groups = "drop") %>%
+  bind_rows(
+    basic_eval %>%
+      summarise(n_filled = sum(!is.na(eventDate_truth) & eventDate_truth != "")) %>%
+      mutate(field = "eventDate")
+  )
+
+ggplot(
+  attempt_df %>%
+    left_join(field_n_attempt, by = "field") %>%
+    mutate(
+      field_label = paste0(field, " (n=", n_filled, ")"),
+      field_label = factor(field_label,
+                           levels = paste0(
+                             field_order_attempt, " (n=",
+                             field_n_attempt$n_filled[match(field_order_attempt,
+                                                            field_n_attempt$field)],
+                             ")"))
+    ),
+  aes(x = field_label, y = proportion, fill = category)
+) +
+  geom_col(position = position_stack(reverse = TRUE), width = 0.8) +
+  coord_flip() +
+  scale_fill_manual(
+    values = c(
+      "LLM filled"    = "#39A26F",
+      "LLM misplaced" = "#e98870",
+      "LLM missed"    = "#BBBBBB"
+    )
+  ) +
+  scale_y_continuous(limits = c(0, 1),
+                     breaks = seq(0, 1, by = 0.20),
+                     labels = seq(0, 1, by = 0.20),
+                     expand = expansion(mult = c(0.05, 0.05))) +
+  labs(x = NULL, y = "A. LLM Results as a Proportion of hp-Filled Fields", fill = NULL) +
+  theme_minimal() +
+  theme(
+    legend.position    = "top",
+    axis.text.y        = element_text(size = 9, hjust = 1, margin = margin(r = -10)),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank()
+  )
+```
+
+---
+
+# Summary Statistics
+
+```{r total-filled}
+# Total fields filled across all LLM-transcribed specimens
+total_filled <- claude %>%
+  filter(match_type != "no_text_detected") %>%
+  select(specimen_id, all_of(score_fields)) %>%
+  pivot_longer(-specimen_id, names_to = "field", values_to = "val") %>%
+  filter(!is.na(val) & val != "") %>%
+  nrow()
+
+message(sprintf("Total fields filled by LLM: %d (mean %.1f/specimen)",
+                total_filled, total_filled / 8089))
+```
+
+```{r detection-rates}
+# Detection, false positive, and missed rates (includes eventDate)
+all_eval_fields <- c(score_fields, "eventDate")
+
+composite_long %>%
+  filter(field %in% all_eval_fields) %>%
+  left_join(claude_long, by = c("specimen_id", "field")) %>%
+  left_join(truth_long,  by = c("specimen_id", "field")) %>%
+  mutate(
+    claude_filled = !is.na(claude_val) & claude_val != "",
+    truth_filled  = !is.na(truth_val)  & truth_val  != ""
+  ) %>%
+  summarise(
+    n_hp_filled            = sum(truth_filled),
+    n_hp_empty             = sum(!truth_filled),
+    n_llm_filled_hp_filled = sum(claude_filled &  truth_filled),
+    n_llm_filled_hp_empty  = sum(claude_filled & !truth_filled),
+    n_llm_empty_hp_filled  = sum(!claude_filled & truth_filled),
+    n_llm_filled_total     = sum(claude_filled),
+    detection_rate         = round(sum(claude_filled &  truth_filled) / sum(truth_filled)  * 100, 1),
+    false_positive_rate    = round(sum(claude_filled & !truth_filled) / sum(!truth_filled) * 100, 1),
+    missed_rate            = round(sum(!claude_filled & truth_filled) / sum(truth_filled)  * 100, 1)
+  ) %>%
+  print()
+```
+
+```{r similarity-summary}
+# Token-level similarity scores (score_fields only, excludes eventDate)
+composite_long %>%
+  filter(field %in% score_fields) %>%
+  left_join(claude_long, by = c("specimen_id", "field")) %>%
+  left_join(truth_long,  by = c("specimen_id", "field")) %>%
+  filter(!is.na(composite),
+         !is.na(claude_val) & claude_val != "",
+         !is.na(truth_val)  & truth_val  != "") %>%
+  summarise(
+    n_total    = n(),
+    n_gte075   = sum(composite >= 0.75),
+    pct_gte075 = round(sum(composite >= 0.75) / n() * 100, 1),
+    n_gte050   = sum(composite >= 0.50),
+    pct_gte050 = round(sum(composite >= 0.50) / n() * 100, 1),
+    mean       = round(mean(composite), 3),
+    se         = round(sd(composite) / sqrt(n()), 3)
+  ) %>%
+  print()
+```
+
+```{r per-field-means}
+# Per-field means for top fields
+composite_long %>%
+  filter(field %in% c("stateProvince", "county", "country", "recordedBy")) %>%
+  left_join(claude_long, by = c("specimen_id", "field")) %>%
+  left_join(truth_long,  by = c("specimen_id", "field")) %>%
+  filter(!is.na(composite),
+         !is.na(claude_val) & claude_val != "",
+         !is.na(truth_val)  & truth_val  != "") %>%
+  group_by(field) %>%
+  summarise(
+    mean = round(mean(composite), 3),
+    se   = round(sd(composite) / sqrt(n()), 3),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(mean)) %>%
+  print()
+```
+
+```{r misplacement-rate}
+# Misplacement rate
+misplace_summary <- misplacement %>%
+  filter(field %in% score_fields) %>%
+  summarise(
+    total_filled    = n(),
+    total_misplaced = sum(misplaced, na.rm = TRUE),
+    rate            = round(total_misplaced / total_filled * 100, 1)
+  )
+
+message(sprintf("Misplaced: %d of %d LLM-filled fields (%.1f%%)",
+                misplace_summary$total_misplaced,
+                misplace_summary$total_filled,
+                misplace_summary$rate))
+```
+
+```{r total-llm-filled-matched}
+# Total LLM-filled fields in matched specimens
+composite_long %>%
+  filter(field %in% all_eval_fields) %>%
+  left_join(claude_long, by = c("specimen_id", "field")) %>%
+  filter(!is.na(claude_val) & claude_val != "") %>%
+  summarise(n = n()) %>%
+  print()
+```
+
+---
+
+# Country Map
+
+```{r country-data}
+country_counts_raw <- read.csv("country_counts.csv")
+
+country_summary <- country_counts_raw %>%
+  select(country = unique_countries, n = specimen_count) %>%
+  filter(!is.na(country), !is.na(n)) %>%
+  distinct() %>%
+  filter(country != "TOTAL (claude+human)") %>%
+  mutate(country = str_replace(country, "Cura\u00c3\u00a7ao", "Curaçao"),
+         country = str_trim(country))
+
+# hp specimens missing from country_counts due to double prefix bug
+hp_missing <- bind_rows(
+  read.csv("34_6_8_tray_09GT.csv") %>%
+    mutate(specimen_id = paste0("cicindelidae_", specimen_id)),
+  read.csv("34_7_5_tray_04GT.csv") %>%
+    mutate(specimen_id = paste0("cicindelidae_", specimen_id))
+) %>%
+  filter(!specimen_id %in% country_counts_raw$specimen_id) %>%
+  filter(!is.na(country) & country != "") %>%
+  count(country, name = "n")
+
+country_summary <- country_summary %>%
+  bind_rows(hp_missing) %>%
+  group_by(country) %>%
+  summarise(n = sum(n), .groups = "drop") %>%
+  arrange(desc(n))
+```
+
+## Packages
+
+```{r map-packages, eval=FALSE}
+install.packages(c("rnaturalearth", "rnaturalearthdata"))
+```
+
+```{r map-libraries}
+library(rnaturalearth)
+library(rnaturalearthdata)
+```
+
+## Check country names
+
+```{r check-countries}
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+unmatched <- country_summary %>%
+  filter(!country %in% world$name_long) %>%
+  pull(country)
+
+## find any country names that aren't matching to the naturalearth package
+
+message(sprintf("%d unmatched countries:", length(unmatched)))
+print(unmatched)
+
+for (nm in unmatched) {
+  sims <- stringsim(nm, world$name_long, method = "lv")
+  best <- world$name_long[order(sims, decreasing = TRUE)[1:3]]
+  message(sprintf("  '%s' → closest: %s", nm, paste(best, collapse = " | ")))
+}
+```
+
+## Re-map unmatched countries
+
+```{r recode-countries}
+country_summary_recode <- country_counts_raw %>%
+  select(country = unique_countries, n = specimen_count) %>%
+  filter(!is.na(country), !is.na(n)) %>%
+  distinct() %>%
+  filter(country != "TOTAL (claude+human)") %>%
+  mutate(country = str_replace_all(country, "\u00a0", " "),
+         country = str_squish(country)) %>%
+  mutate(country_map = case_when(
+    country == "United Republic of Tanzania" ~ "Tanzania",
+    country == "Russia"                      ~ "Russian Federation",
+    country == "Laos"                        ~ "Lao PDR",
+    country == "North Korea"                 ~ "Dem. Rep. Korea",
+    country %in% c("Netherlands Antilles", "Yugoslavia",
+                   "Bonaire", "French Guiana") ~ NA_character_,
+    TRUE                                       ~ country
+  )) %>%
+  filter(!is.na(country_map))
+```
+
+## Heat map of countries
+
+```{r country-map}
+specimen_points <- tibble(
+  label = c("b", "c", "d", "e", "f", "g"),
+  lat   = c( 37.52,  10.98,  37.13,  29.97,  34.40,  -2.53),
+  lon   = c(-89.44, -85.43,  -6.82,  32.55, 136.40, 140.72)
+)
+
+world %>%
+  left_join(country_summary_recode, by = c("name_long" = "country_map")) %>%
+  ggplot() +
+  geom_sf(aes(fill = n), color = "white", linewidth = 0.2) +
+  geom_point(data = specimen_points,
+             aes(x = lon, y = lat),
+             shape = 16, color = "#FF0000", size = 2) +
+  scale_fill_viridis_c(
+    option   = "viridis",
+    trans    = "log10",
+    na.value = "grey90",
+    name     = "specimens\n",
+    breaks   = c(1, 10, 50, 100, 500, 1000, 3000),
+    labels   = c("1", "10", "50", "100", "500", "1,000", ">3,000")
+  ) +
+  guides(fill = guide_colorbar(
+    barwidth     = unit(8, "cm"),
+    barheight    = unit(0.4, "cm"),
+    ticks        = TRUE,
+    ticks.colour = "white"
+  )) +
+  labs(x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(
+    panel.grid      = element_blank(),
+    axis.text       = element_blank(),
+    axis.ticks      = element_blank(),
+    legend.position = "bottom"
+  ) +
+  geom_text(
+    data = specimen_points %>% arrange(lon) %>% mutate(label = letters[2:7]),
+    aes(x = lon, y = lat, label = label),
+    size = 2.7, fontface = "bold", color = "red", vjust = -0.75
+  )
+```
