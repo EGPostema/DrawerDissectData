@@ -2,7 +2,7 @@
 
 This dataset includes all transcriptions, IDs, and measurements extracted from the Field Museum's entire >13K collection of pinned tiger beetles (Cicindelidae) using [DrawerDissect](https://github.com/EGPostema/DrawerDissect/tree/main).
 
-<img width="1033" height="738" alt="Screenshot 2025-11-06 212525" src="https://github.com/user-attachments/assets/a1701d65-108a-480f-a818-c55b0027eb10" />
+<img width="1033" height="738" alt="image" src="https://github.com/user-attachments/assets/0dddfb0a-1c22-4f76-a191-c54d9e623d55" />
 
 ## Manuscript
 
@@ -12,84 +12,68 @@ Postema, E.G., Briscoe, L., Harder, C., Hancock, G.R.A., Guarnieri, L.D, Eisel, 
 
 ### R Scripts
 
--   **`size_validation.Rmd`** - Analysis comparing manual vs. digital measurements and generating genus-level size summaries.
+- **`size_validation.Rmd`** - Analysis comparing manual vs. digital measurements and generating genus-level size summaries.
 
--   **`maps.Rmd`** - Visualizing the geographic distribution of tiger beetle specimens in the FMNH collection.
+- **`transcription_evaluation.Rmd`** - Field-by-field comparison of LLM transcriptions against human-produced DarwinCore records, including similarity scoring, misplacement detection, date standardisation, and a map of geographic coverage.
 
 ### Data CSVs
 
--   **`countries.csv`** - List of countries that specimens belong to
--   **`handmeasure.csv`** - Manual measurements for a random subset
--   **`spec_expanded.csv`** - Fully merged specimen-level dataset for the FMNH tiger beetle collection
--   **`llm_validation.csv`** - Includes all raw LLM transcriptions and revised locations for specimen-level metadata, plus reviewer commentary on estimate quality
+- **`drawerdissect_sizes.csv`** - Specimen-level dataset including IDs, taxonomy, and measurements extracted by DrawerDissect.
+
+- **`handmeasure.csv`** - Manual measurements for a random subset of specimens, used to validate DrawerDissect digital measurements.
+
+- **`dwc_existing_records.csv`** - Human-produced DarwinCore records for tiger beetle specimens (from previous databasing efforts)
+
+- **`claude_transcriptions.csv`** - Raw LLM transcriptions of specimen label text, produced from dorsal images.
+
+- **`country_counts.csv`** - Pre-computed specimen counts per country, used to generate the geographic coverage map.
+
+- **`tray01GT.csv`, `tray03GT.csv`, `34_4_7_tray_07GT.csv`, `34_6_8_tray_09GT.csv`, `34_7_5_tray_04GT.csv`** - Additional human-produced records for five trays not present in `dwc_existing_records.csv`.
 
 ## Variables
 
-### countries.csv
+### drawerdissect_sizes.csv
 
--   `full_id`: specimen ID produced by DrawerDissect; concatenation of drawer_id, tray_id, and specimen position
--   `tray_id`: unit tray ID produced by DrawerDissect
--   `country_transcribed`: country the specimen was collected from, either manually or LLM-transcribed
--   `country_est`: an estimated country, filled in using a known country common to the unity tray
--   `country_all`: full list of countries (transcribed and estimated)
--   `country_source`: tag for transcribed vs estimated
--   `trasnscription_from`: the source for the transcription, either fully manual or LLM-produced
+- `full_id`: specimen ID produced by DrawerDissect; concatenation of drawer_id, tray_id, and specimen position
+- `FMNH-INS#`: unique Field Museum-specific ID, associated with a QR code
+- `drawer_id`: unique ID for each drawer based on position in collection cabinets
+- `tray_id`: unit tray ID produced by DrawerDissect
+- `unit_barcode`: 5-digit unique identifier for each tray
+- `full_taxonomy`: unstructured taxonomic identity as a full string, e.g. "Species genus subspecies"
+- `genus`
+- `len1_mm`: longest line (in mm) between two points on the specimen mask, measured by DrawerDissect
+- `len2_mm`: longest line perpendicular to len1_mm, measured by DrawerDissect
+- `spec_area_mm2`: area of the specimen mask, measured by DrawerDissect
 
 ### handmeasure.csv
 
--   `drawer_id`: unique ID for each drawer based on position in collection cabinets
--   `unit_barcode`: 5-digit unique identifier for each tray
--   `spec_position`: specimen position in a tray, automatically numbered by DrawerDissect (001 = top left)
--   `manual_length_mm`: head-to-tip of abdomen measurement, taken manually, in mm
--   `manual_width_mm`: widest part of the abdomen, taken manually, in mm
+- `drawer_id`: unique ID for each drawer based on position in collection cabinets
+- `unit_barcode`: 5-digit unique identifier for each tray
+- `spec_position`: specimen position in a tray, automatically numbered by DrawerDissect (001 = top left)
+- `manual_length_mm`: head-to-tip of abdomen measurement, taken manually, in mm
+- `manual_width_mm`: widest part of the abdomen, taken manually, in mm
 
-### spec_expanded.csv
+### dwc_existing_records.csv and additional tray-level csvs:
 
--   `full_id`: same as above
--   `FMNH-INS#`: unique Field Museum-specific ID, associated with a QR code
--   `drawer_id`: same as above
--   `tray_id`: same as above
--   `unit_barcode`: same as above
--   `full_taxonomy`: unstructured taxonomic identity as a full string, e.g. "Species genus subspecies"
--   `genus`
--   `len1_mm`: longest line (in mm) between two points on the specimen mask, measured by DrawerDissect
--   `len2_mm`: longest line perpendicular to len1_mm, measured by DrawerDissect
--   `spec_area_mm2`: area of the specimen mask, measured by DrawerDissect
--   `geocode`:
--   `geocode`: 3-digit code for the biogeographical realm of all specimens in the tray (NEA = Nearctic, NEO = Neotropical, PAL = Palearctic, ORI = Oriental, AFR = Afrotropical, AUS = Australasian, PAC = Pacific)
--   `country`
--   `province_state`: also includes prefectures, districts, and similar geographic units
--   `county`
--   `city`
--   `prec_location`: specific natural or manmade features, islands, precise localities, and geographic units that don't fit in other categories
--   `elevation_fr`: collection elevation (start of range)
--   `elevation_to`: collection elevation (end of range)
--   `elevation_fr_ft`: same as above, in ft
--   `elevation_to_ft`: same as above, in ft
--   `site_num`: for campsites, base camps, and other numbered sites
--   `latitude`: in decimal degrees
--   `longitude`: in decimal degrees
--   `habitat`: broad habitat descriptions, e.g. "lakeshore" or "forest"
--   `microhabitat`: more specific habitat descriptions, e.g. "path in dense woods" or "abandoned flooded sand pit"
--   `collect_method:` e.g. light trap, net, pitfall trap
--   `date_from`: collection date (start of range)
--   `date_to`: collection date (end of range)
--   `collectors`: names of specimen collector(s)
--   `sex`: male (M) or female (F), if available
--   `lifestage`: adults only
--   `specimen`: whether the full_id image contains a specimen or not (Y/N)
--   `specimen_condition`: broken (some part is damaged), headless,
--   `mask_condition`: quality of the specimen mask produced by DrawerDissect
--   `notes`
+- `specimen_id`: unique specimen identifier
+- `country`, `stateProvince`, `county`, `municipality`, `locality`: geographic fields from broadest to most specific
+- `islandGroup`, `island`: island-specific geographic fields
+- `verbatimElevation`: elevation as recorded on the label
+- `habitat`: broad habitat description
+- `samplingProtocol`: collection method
+- `recordedBy`: collector name(s)
+- `verbatimEventDate`: collection date as recorded on the label
 
-### llm_validation
+### claude_transcriptions.csv
 
--   `full_id`: same as above
--   `geocode`: same as above
--   `verbatim`: raw text output by LLM claude in response to specimen dorsal views
--   `claude_location`: comma-seperated location estimate made by LLM based on the verbatim text, organized from largest to smallest geographic unit
--   `claude_assessment`: quality assessment determined by the LLM comapring the verbatim text to the estimate
--   `estimate_made`: whether or not the LLM makes a location estimate
--   `human_score`: whether the LLM's estimate is correct, incorrect, partially correct, or NA (no estimate made)
--   `endpoint`: concatenation of claude_assessment, estimate_made, and human_score
+- `specimen_id`: unique specimen identifier
+- `match_type`: whether label text was detected (`no_text_detected` indicates a blank or illegible label); if detected, whether the label is unique or similar to another label in the same tray
+- `verbatimEventDate`: date as transcribed by the LLM
+- `country`, `stateProvince`, `county`, `municipality`, `locality`, `islandGroup`, `island`, `verbatimElevation`, `habitat`, `samplingProtocol`, `recordedBy`: label fields transcribed by the LLM
+
+### country_counts.csv
+
+- `specimen_id`: unique specimen identifier
+- `unique_countries`: country the specimen was collected from
+- `specimen_count`: number of specimens from that country
 
