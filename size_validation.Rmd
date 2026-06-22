@@ -13,7 +13,7 @@ graphics.off()
 ```
 # Read-In Data
 ```{r}
-full_data<-read.csv("spec_expanded.csv")
+full_data<-read.csv("drawerdissect_sizes.csv")
 handmeasures<-read.csv("handmeasure.csv")
 
 # Make sure size is numeric
